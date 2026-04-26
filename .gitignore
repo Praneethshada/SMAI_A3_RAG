@@ -1,0 +1,27 @@
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and OS specific files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# RAG/Data specific (if you have local vector stores or logs)
+*.log
+data/
+storage/
+chroma_db/
