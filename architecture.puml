@@ -1,0 +1,202 @@
+@startuml RTI_RAG_Architecture
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam componentStyle rectangle
+
+title RTI Assistant — RAG Chatbot Architecture
+
+' ══════════════════════════════════════════════════════
+'  COMPONENT DIAGRAM
+' ══════════════════════════════════════════════════════
+
+' --- External Actor ---
+actor "Citizen / User" as User
+database "Official RTI PDFs\n(data/)" as PDFs
+
+' ─── Offline Ingestion Pipeline ─────────────────────────────────────────────
+package "OFFLINE INGESTION  (ingest.py)" #LightBlue {
+
+    component "PyPDFDirectoryLoader\n[LangChain]" as Loader
+    note right of Loader
+      Loads all PDFs in data/
+      Extracts text + metadata
+      (source, page number)
+    end note
+
+    component "SmartChunker\nRecursiveCharacterTextSplitter" as Chunker
+    note right of Chunker
+      chunk_size  = 700
+      chunk_overlap = 150
+      separators: RTI section
+      headers first, then
+      paragraphs, sentences
+      add_start_index = True
+    end note
+
+    component "Metadata Enricher" as MetaEnricher
+    note right of MetaEnricher
+      Adds:
+      • doc_type  (Act / Rules /
+                   FAQ / Manual)
+      • chunk_id  (sha256 hash,
+                   12 chars)
+                  → idempotent
+    end note
+
+    component "MiniLM Encoder\nall-MiniLM-L6-v2\n[sentence-transformers]" as Encoder
+    note right of Encoder
+      384-dim dense embeddings
+      Runs locally on CPU
+      No API cost
+    end note
+
+    database "ChromaDB\n(chroma_db/)" as VectorDB
+    note right of VectorDB
+      Cosine similarity index
+      Persisted on disk
+      Stores: text, embedding,
+      metadata (chunk_id,
+      doc_type, source, page)
+    end note
+}
+
+' ─── Online Query Pipeline ─────────────────────────────────────────────────
+package "ONLINE QUERY  (app.py)" #LightGreen {
+
+    component "Streamlit UI\n[Frontend]" as UI
+    note left of UI
+      • st.chat_input / st.chat_message
+      • Sidebar: Hindi toggle,
+        model info, clear chat
+      • Expandable source citations
+      • Streaming token display
+    end note
+
+    component "Session State\n[st.session_state]" as Session
+    note left of Session
+      Stores chat history
+      (role, content pairs)
+      Stateless per request →
+      horizontally scalable
+    end note
+
+    component "History-Aware\nRetriever\n[LangChain]" as HAR
+    note right of HAR
+      create_history_aware_retriever
+      Condenses last-N messages
+      + current query →
+      standalone question
+      (handles follow-up queries)
+    end note
+
+    component "MMR Retriever\n[ChromaDB]" as MMR
+    note right of MMR
+      Maximal Marginal Relevance
+      fetch_k = 20, k = 6
+      λ = 0.7
+      Balances relevance +
+      diversity of chunks
+    end note
+
+    component "Prompt Builder\n[ChatPromptTemplate]" as Prompt
+    note right of Prompt
+      System: RTI expert role +
+              Hindi flag if toggled
+      Context: retrieved chunks
+      Human: condensed query
+    end note
+
+    component "Groq LLM\nllama-3.3-70b-versatile\n[ChatGroq]" as LLM
+    note right of LLM
+      streaming = True
+      temperature = 0
+      Tenacity retry:
+        3 attempts, exp backoff
+        on 429 / rate-limit
+    end note
+
+    component "Response Formatter" as Formatter
+    note right of Formatter
+      • Streams tokens to UI
+      • Collects source docs
+      • Renders expandable
+        citation pills
+      • Appends to session history
+    end note
+}
+
+' ─── Relationships ─────────────────────────────────────────────────────────
+
+' Ingestion flow
+PDFs --> Loader : reads
+Loader --> Chunker : raw pages
+Chunker --> MetaEnricher : text chunks
+MetaEnricher --> Encoder : enriched chunks
+Encoder --> VectorDB : embed + persist
+
+' Query flow
+User --> UI : types question
+UI --> Session : read chat history
+Session --> HAR : history + query
+VectorDB --> MMR : cosine similarity index
+HAR --> MMR : condensed standalone query
+MMR --> Prompt : top-6 diverse chunks
+Session --> Prompt : chat history context
+UI --> Prompt : Hindi toggle flag
+Prompt --> LLM : augmented prompt
+LLM --> Formatter : streamed tokens
+Formatter --> UI : answer + citations
+UI --> User : rendered response
+Formatter --> Session : append to history
+
+' ══════════════════════════════════════════════════════
+'  SEQUENCE DIAGRAM — Query Flow
+' ══════════════════════════════════════════════════════
+
+newpage Query Sequence Diagram
+
+title RTI Assistant — Query Sequence (Multi-turn, Streaming)
+
+actor "User" as U
+participant "Streamlit UI" as ST
+participant "Session State" as SS
+participant "History-Aware\nRetriever" as HA
+participant "MMR Retriever\n+ ChromaDB" as DB
+participant "Prompt Builder" as PB
+participant "Groq LLM\n(streaming)" as GL
+participant "Response\nFormatter" as RF
+
+U -> ST : types question Q_n
+ST -> SS : read chat_history[Q1..Q_{n-1}]
+ST -> HA : (history, Q_n)
+
+group Conversation Condensing
+    HA -> GL : "Given history, rephrase Q_n\nas standalone question"
+    GL --> HA : Q_n_condensed
+end
+
+HA -> DB : embed(Q_n_condensed)\n→ MMR search (fetch_k=20, k=6)
+DB --> HA : top-6 diverse chunks\n(with metadata)
+
+HA -> PB : (chunks, Q_n_condensed, hindi_flag, history)
+PB -> PB : build ChatPromptTemplate\n(system + context + human)
+
+PB -> GL : augmented prompt (streaming=True)
+
+loop streaming tokens
+    GL --> RF : token_i
+    RF --> ST : st.write(token_i)
+    ST --> U : renders token progressively
+end
+
+GL --> RF : EOS + source documents
+RF -> RF : filter unique sources\n(PDF name + page)
+RF -> ST : expandable citations
+RF -> SS : append (Q_n, A_n) to history
+
+ST --> U : full answer + source expanders
+
+@enduml
