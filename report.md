@@ -1,215 +1,245 @@
-# SMAI Assignment 3: RTI Assistant — Government Services RAG Chatbot
+# Technical Report: RTI Assistant — A RAG-Based Chatbot for Indian Government RTI Services
 
-**Theme T10.3 — RTI Filing Helper**  
-**Course:** Statistical Methods in AI
-**Team:** The3
-**Team Members:** Shada Praneeth Reddy (2025204006), Nagam Chandrakanth Reddy (2025204003), Pittada Sai Harsha Vardhan (2025204021)
+**Course:** Statistical Methods in AI (SMAI), Assignment 3, Theme T10.3
 
----
+**Team Name:** The3
 
-## 1. Introduction & Problem Statement
+**Team Members:** 
+1. Shada Praneeth Reddy 2025204006 (shadapraneeth.reddy@students.iiit.ac.in)
+2. Nagam Chandrakanth Reddy 2025204003 (nagam.reddy@students.iiit.ac.in)
+3. Pittada Sai Harsha Vardhan 2025204021 (pittada.s@students.iiit.ac.in)
 
-Indian government services — particularly the Right to Information (RTI) Act — are backed by extensive official PDF documentation. These documents cover the legal framework, application procedures, fees, timelines, exemptions, and appeal mechanisms. For a typical citizen, navigating multiple dense PDFs to answer a specific procedural question is impractical.
+**GitHub:** [https://github.com/Praneethshada/SMAI_A3_RAG](https://github.com/Praneethshada/SMAI_A3_RAG)
 
-This project builds a **Retrieval-Augmented Generation (RAG)** chatbot that answers questions about RTI filing by retrieving relevant passages directly from the official RTI documents. Answers are grounded **only** in the retrieved context — the LLM cannot hallucinate or draw on outdated training knowledge. This approach requires no model training, makes every answer verifiable via source citations, and is immediately deployable.
+**Demo Video (Drive):** [https://drive.google.com/file/d/17KivbFgwDYT864f6cWiiiWzeE496aVZl/view?usp=sharing](https://drive.google.com/file/d/17KivbFgwDYT864f6cWiiiWzeE496aVZl/view?usp=sharing)
 
----
+**Demo Video (YouTube):** [https://youtu.be/i-qibG_g0_c](https://youtu.be/i-qibG_g0_c)
 
-## 2. Dataset Description
 
-The knowledge base consists of five official documents downloaded from the Government of India's RTI portal:
+## 1. Introduction
 
-| File | Content |
+Indian government services, particularly the Right to Information (RTI) Act, are backed by extensive official PDF documentation covering legal definitions, procedural rules, online filing steps, and FAQs. For a typical citizen, locating a specific fact such as the application fee, response deadline, or appeal process requires manually scanning multiple dense documents, which is impractical.
+
+We address this with a Retrieval-Augmented Generation (RAG) chatbot that:
+
+1. Indexes official RTI PDFs into a local vector database at ingestion time.
+2. At query time, retrieves the most semantically relevant passages and supplies them as grounded context to a large language model (LLM).
+3. Generates a concise, verifiable answer with source citations, referencing only retrieved passages and not the model's parametric knowledge.
+
+This design eliminates hallucination risk, makes every answer auditable, and requires no model training or fine-tuning. The system is packaged as a Streamlit web application.
+
+![Home Page](App%20Screenshots/Home%20Page.png)
+
+*Figure 1: RTI Assistant home page*
+
+![Home Page 2](App%20Screenshots/Home%20Page%202.png)
+
+*Figure 2: Home page showing the topic cards.*
+
+
+## 2. Data
+
+### 2.1 Knowledge Base Documents
+
+Five official documents sourced from the Government of India RTI Portal ([rti.gov.in](https://rti.gov.in)):
+
+| File | Content | Type Tag |
+|---|---|---|
+| `RTI Act 2005 (Amended)-English Version.pdf` | Full text of the RTI Act, 2005 | Act |
+| `RTI-Act.pdf` | Alternate copy of the RTI Act | Act |
+| `RTI_Rules_2019_hindi_english.pdf` | RTI Rules 2012/2019, bilingual | Rules |
+| `RTI FAQ English.pdf` | 27 FAQs covering common citizen queries | FAQ |
+| `RTI Online User Manual English.pdf` | Step-by-step guide for the RTI Online Portal | Manual |
+
+### 2.2 Corpus Statistics
+
+After ingestion: 88 raw pages produce 539 text chunks (average 536 characters per chunk).
+
+| Doc Type | Chunks |
 |---|---|
-| `RTI Act 2005 (Amended)-English Version.pdf` | Full legal text of the RTI Act, 2005 |
-| `RTI-Act.pdf` | Alternative copy of the RTI Act |
-| `RTI_Rules_2019_hindi_english.pdf` | RTI Rules 2012 (amended 2019) — bilingual |
-| `RTI FAQ English.pdf` | Frequently asked questions |
-| `RTI Online User Manual English.pdf` | Step-by-step guide for the RTI Online Portal |
+| Act | ~280 |
+| Manual | ~149 |
+| Rules | ~65 |
+| FAQ | ~45 |
 
-Together these provide comprehensive coverage: legal framework (Act), procedural details (Rules), quick answers (FAQ), and digital filing instructions (Manual). Each document is assigned a `doc_type` metadata tag during ingestion, enabling future filtered retrieval per document category.
+### 2.3 Data Quality Notes
 
----
+PDFs are parsed using PyPDF via LangChain's `PyPDFDirectoryLoader`. The bilingual Rules PDF retains Hindi text, which benefits Hindi-mode retrieval. One PDF (`RTI-Act.pdf`) triggers a non-standard header warning but is parsed correctly after fallback recovery by the library.
 
-## 3. System Architecture (RAG Pipeline)
 
-The system is split into two independent phases.
+## 3. Method
 
-### 3.1 Offline Ingestion Phase (`ingest.py`)
+### 3.1 Ingestion Pipeline (ingest.py)
+
+The offline pipeline runs once and produces the persistent vector index.
 
 ```
-RTI PDFs  ──►  PyPDFLoader  ──►  SmartChunker  ──►  MiniLM Encoder  ──►  ChromaDB
-(data/)         (text +          (700/150,           (384-dim dense       (persisted
-                 metadata)        section-aware,       embeddings,          vector
-                                  chunk_id,            local CPU)           index)
-                                  doc_type)
+RTI PDFs -> PyPDFLoader -> SmartChunker -> MetadataEnricher -> MiniLM Encoder -> ChromaDB
 ```
 
-**Steps:**
+**Step 1: Document Loading.** `PyPDFDirectoryLoader` reads all `.pdf` files in `data/`, extracting page text and metadata (source filepath, page number).
 
-1. **Document Loading**: `PyPDFDirectoryLoader` extracts text and metadata (`source`, `page`) from every PDF in `data/`.
+**Step 2: Smart Chunking.** `RecursiveCharacterTextSplitter` uses a custom separator hierarchy that respects RTI legal structure before falling back to finer splits:
 
-2. **Smart Chunking**: `RecursiveCharacterTextSplitter` is configured with RTI-specific separators that respect legal section boundaries (`Section N`, `Chapter IV`, `Rule N`) before falling back to paragraph → sentence → character splits. Chunk size is 700 characters with 150-character overlap.
-   - *Why 700?*: `all-MiniLM-L6-v2` has a 512-token window (~384 words). 700 characters is approximately 140 words — well within the window for English legal text, ensuring no truncation during embedding.
-   - *Why smaller than 1000?*: Finer chunks → more precise retrieval for specific facts (fees, deadlines, section numbers).
+```
+Section N / Chapter IV / Rule N  ->  paragraph  ->  line  ->  sentence  ->  word  ->  character
+```
 
-3. **Metadata Enrichment**:
-   - `doc_type`: "Act", "Rules", "FAQ", or "Manual" — classified from filename.
-   - `chunk_id`: `sha256(source + page + start_index)[:12]` — a deterministic 12-character hash. This makes ingestion **idempotent**: re-running `ingest.py` with the same PDFs never creates duplicate chunks in ChromaDB.
+Parameters: `chunk_size=700`, `chunk_overlap=150`, `add_start_index=True`.
 
-4. **Embedding**: `sentence-transformers/all-MiniLM-L6-v2` runs locally on CPU. It produces 384-dimensional dense embeddings — a proven, lightweight model for semantic search on English text, with no API cost or latency.
+Why 700 characters? The `all-MiniLM-L6-v2` model has a 512-token context window, corresponding to approximately 700 to 900 English characters. Staying within this boundary avoids embedding truncation. Smaller chunks also improve precision: a question about the RTI fee retrieves the exact clause stating Rs. 10 rather than a large paragraph that merely mentions fees in passing.
 
-5. **Vector Store**: ChromaDB persists embeddings to disk (`chroma_db/`). The cosine similarity index enables sub-second approximate nearest-neighbour search over thousands of chunks.
+**Step 3: Metadata Enrichment.** Each chunk receives two new fields:
 
-### 3.2 Online Query Phase (`app.py`)
+- `doc_type`: Keyword-classified from filename (Act, Rules, FAQ, Manual). Enables future filtered retrieval per document category.
+- `chunk_id`: `sha256(source_path + "::" + page + "::" + start_index)[:12]`, a deterministic 12-character hash. This makes ingestion idempotent: re-running after adding new PDFs only embeds new chunks, never duplicating existing ones.
+
+**Step 4: Embedding and Persistence.** Chunks are embedded with `all-MiniLM-L6-v2` (384-dimensional, runs locally on CPU, no API cost). Vectors are stored in ChromaDB with automatic disk persistence.
+
+### 3.2 Query Pipeline (app.py)
+
+Built using LangChain LCEL (LangChain Expression Language), the modern composable API.
 
 ```
 User Query
-    │
-    ▼
-History-Aware Condenser          ← chat_history + current Q
-    │  (produces standalone Q)
-    ▼
-MMR Retriever (ChromaDB)         ← fetch_k=20, k=6, λ=0.7
-    │  (6 diverse, relevant chunks)
-    ▼
-Prompt Builder                   ← system + context + history + query
-    │  (+ Hindi flag if toggled)
-    ▼
-Groq LLM (llama-3.3-70b)        ← streaming=True, temp=0
-    │  (streamed tokens)
-    ▼
-Streamlit UI                     ← answer + expandable citations
+  -> History-Aware Condenser
+  -> MMR Retriever (ChromaDB)
+  -> Prompt Builder (with Hindi flag)
+  -> Groq LLM (temperature=0)
+  -> Streamlit UI (answer + expandable citations)
 ```
 
-**Steps:**
+**History-Aware Question Condensing.**
+Before retrieval, a dedicated LLM call rewrites the current user message into a self-contained search query incorporating the conversation history. This is implemented as an LCEL chain: `condense_prompt | groq_llm | StrOutputParser()`.
 
-1. **History-Aware Condenser** (`create_history_aware_retriever`): Before retrieval, the last N chat messages and the current question are sent to the LLM with the instruction: *"Rephrase this as a self-contained search query."* This resolves pronouns and implicit references in follow-up questions. Example: *"What about the fees?"* becomes *"What is the fee for filing an RTI application?"* — drastically improving retrieval precision.
+Without condensing, a follow-up question like "What about BPL applicants?" is retrieved verbatim. The retriever has no context of what was previously discussed and returns irrelevant results.
 
-2. **MMR Retrieval**: Instead of plain top-k similarity search, **Maximal Marginal Relevance** selects chunks that are both relevant *and* diverse. From a candidate pool of 20 chunks (`fetch_k=20`), MMR picks 6 (`k=6`) that maximise relevance while minimising redundancy (controlled by `λ=0.7`). This prevents the context window from being dominated by near-identical excerpts from the same section.
+With condensing, the chain produces "RTI application fee exemption for BPL (below poverty line) applicants", which retrieves the correct exemption clause with high precision.
 
-3. **Prompt Engineering**: The system prompt establishes the LLM as an RTI expert, provides the retrieved context, and — when the Hindi toggle is on — instructs the model to respond entirely in Hindi (Devanagari script). `temperature=0` ensures deterministic, factual answers appropriate for legal information.
+**MMR Retrieval.**
+Maximal Marginal Relevance (MMR) retrieval prevents the context window from being flooded with near-duplicate passages from the same section. From a candidate pool of 20 chunks (`fetch_k=20`), MMR selects 6 (`k=6`) that maximise both relevance and diversity (`lambda_mult=0.7`).
 
-4. **Streaming Response**: The LLM response is streamed token-by-token to the UI. This is critical for government-facing applications: users see progress immediately rather than waiting for a complete response (reducing perceived latency significantly).
+Example for the query "What are the exemptions under RTI?":
+- Top-6 cosine similarity: 5 near-identical Section 8 excerpts from one PDF plus 1 FAQ entry.
+- MMR: 2 Section 8 passages (Act) plus Rules expansion plus FAQ summary plus Manual reference plus amended clause. This gives the LLM a richer, more complete context.
 
-5. **Source Citations**: Source documents are rendered as expandable UI elements showing the PDF filename, document type, and exact page numbers.
+**Prompt Engineering.**
+The system prompt instructs the LLM to act as an RTI domain expert, answer only from retrieved context, cite specific sections and rules, and conditionally respond in Hindi when the toggle is active. Temperature is set to 0 for deterministic, factual output, which is essential for legal and government information.
 
----
+**Retry Logic.**
+All LLM calls are wrapped with Tenacity exponential backoff: 3 attempts with waits of 2 seconds, 4 seconds, and 8 seconds on `GroqRateLimitError` (HTTP 429). This provides graceful degradation for a public-facing service.
 
-## 4. Implementation Details & ML Best Practices
+**Streaming Output.**
+The LLM client is initialised with `streaming=True`. The Streamlit UI renders status placeholders during retrieval and then the full answer via `st.markdown()` once generation completes. This reduces perceived latency: users see immediate feedback rather than a blank screen during LLM generation.
 
-### 4.1 Technology Stack
+### 3.3 System Architecture
 
-| Component | Technology | Rationale |
+The Streamlit frontend has three views navigable from a persistent sidebar:
+
+| View | Purpose |
+|---|---|
+| Home | Chat interface; hero card and topic cards when chat is empty |
+| Resources | Browsable PDF list with in-browser download links |
+| Settings | Language toggle and model configuration display |
+
+**Key system design decisions for public and government usability:**
+
+| Decision | Rationale |
+|---|---|
+| `@st.cache_resource` pipeline caching | Embeddings, DB, and LLM loaded once per worker; low latency under concurrent use |
+| Stateless session design (all state in `st.session_state`) | Server holds no per-user data, horizontally scalable, no sticky sessions |
+| Input sanitization (strip and truncate to 1000 chars) | Prevents prompt injection and runaway token usage |
+| History window cap (MAX_HISTORY=10 messages) | Bounds token cost per query regardless of conversation length |
+| Graceful DB-missing error page | Setup instructions shown instead of unhandled crash |
+
+**Component Architecture Diagram:**
+
+![Architecture Diagram](Architecture%20&%20Sequence%20Diagrams/Architecture%20Diagram.png)
+
+*Figure 3: Component architecture diagram showing the offline ingestion pipeline and online query pipeline.*
+
+**Query Sequence Diagram:**
+
+![Sequence Diagram](Architecture%20&%20Sequence%20Diagrams/Sequence%20Diagram.png)
+
+*Figure 4: Sequence diagram of a multi-turn query showing the condenser, MMR retriever, LLM call, and retry logic.*
+
+### 3.4 Optional Feature: Hindi Language Toggle
+
+The assignment specification lists "Talk in Hindi toggle" as an optional feature. This is fully implemented.
+
+A sidebar toggle (mirrored in the Settings page) injects a language directive into the system prompt:
+- Hindi ON: "You MUST respond entirely in Hindi (Devanagari script). Even if the question is in English, answer in Hindi."
+- Hindi OFF: "Respond ONLY in English", which explicitly prevents language drift from prior Hindi context in the conversation history.
+
+The toggle persists across the session. The chat input placeholder also switches to Hindi when the mode is active.
+
+
+## 4. Results
+
+### 4.1 Sample Interactions
+
+The following screenshots show the system responding to representative RTI queries. Screenshots are taken from the local running application.
+
+![English Question](App%20Screenshots/English%20Question.png)
+
+*Figure 5: English mode question and response*
+
+![Citations](App%20Screenshots/Citiations.png)
+
+*Figure 6: Reference sources expander showing PDF name, document type, and page numbers.*
+
+
+![Hindi Question](App%20Screenshots/Hindi%20Question.png)
+
+*Figure 7: Hindi mode active, showing a Devanagari response to the query.*
+
+### 4.2 Application Pages
+
+![Resources](App%20Screenshots/Resources.png)
+
+*Figure 8: Resources page listing all knowledge-base PDFs with download links.*
+
+![Settings](App%20Screenshots/Settings.png)
+
+*Figure 9: Settings page showing the language toggle and model configuration.*
+
+### 4.3 Ablation: Effect of Chunk Size
+
+| Chunk Size | Overlap | Chunks | Retrieval Quality |
+|---|---|---|---|
+| 1000 | 200 | ~380 | Returns large paragraphs; specific facts sometimes missed |
+| 700 | 150 | 539 | Retrieves specific clauses, section numbers, exact figures; best precision |
+| 400 | 100 | ~900 | Over-fragmented; splits mid-sentence; loses surrounding context |
+
+Chunk size 700 is optimal for this domain: precise enough to isolate individual facts, large enough to preserve sentence-level context.
+
+### 4.4 Retrieval Strategy Comparison
+
+| Retrieval Method | Context Diversity | Answer Completeness |
 |---|---|---|
-| Frontend | Streamlit ≥ 1.32 | Rapid prototyping; built-in chat UI primitives |
-| Document Parsing | PyPDF | Reliable PDF text extraction |
-| Embeddings | `all-MiniLM-L6-v2` | 384-dim, fast on CPU, strong semantic similarity |
-| Vector Store | ChromaDB | Lightweight, no server required, cosine search |
-| Retrieval | LangChain (MMR) | High-level abstractions + MMR support |
-| LLM | Groq — llama-3.3-70b-versatile | Fast inference, free tier, high quality |
-| Retry | Tenacity | Production-grade retry with exponential backoff |
-| Orchestration | LangChain LCEL | Composable, testable pipeline components |
+| Top-k cosine (k=6) | Low, near-duplicates dominate | Misses complementary sections |
+| MMR (fetch_k=20, k=6, lambda=0.7) | High, diverse document types | Complete, Act plus Rules plus FAQ |
 
-### 4.2 Embedding Model Choice
+**Demo Video:**
 
-`all-MiniLM-L6-v2` is selected over larger alternatives because:
-- It runs entirely locally (no API cost, no network dependency during ingestion)
-- 384-dim embeddings are sufficient for lexically specific RTI queries (fees, sections, deadlines)
-- It is the standard benchmark model for semantic search in the sentence-transformers ecosystem
+[Watch on YouTube](https://youtu.be/i-qibG_g0_c) — [Watch on Google Drive](https://drive.google.com/file/d/17KivbFgwDYT864f6cWiiiWzeE496aVZl/view?usp=sharing)
 
-### 4.3 Chunking Strategy
 
-A naive fixed-size chunker risks splitting mid-sentence or mid-section, creating incoherent chunks. The custom separator list:
-```
-Section N / Chapter IV / Rule N  →  paragraph  →  sentence  →  word  →  character
-```
-ensures the splitter always tries to break at legal section boundaries first. `add_start_index=True` records the character offset within the source document, enabling the deterministic chunk ID.
+## 5. Limitations
 
-### 4.4 Retrieval Quality: MMR vs. Top-K
+1. **PDF Parsing Quality.** PyPDF extracts raw text without understanding layout. Tables such as fee schedules lose column alignment. Libraries like `pdfplumber` or `unstructured` would improve structured data extraction.
 
-Standard top-k retrieval can return highly similar chunks from the same paragraph. For a question like *"What are the exemptions?"* (Section 8, RTI Act), top-4 similarity might return four nearly-identical excerpts of Section 8, wasting the context window. MMR explicitly penalises chunks similar to already-selected ones, ensuring the context contains diverse perspectives — e.g., the Act text, the Rules expansion, and an FAQ summary.
+2. **Monolingual Embeddings.** `all-MiniLM-L6-v2` is English-dominant. Queries about content that appears primarily in the Hindi section of the bilingual Rules PDF may have reduced retrieval accuracy. A multilingual model such as `paraphrase-multilingual-MiniLM-L12-v2` would address this.
 
-### 4.5 Multi-turn Conversation Handling
+3. **Static Knowledge Base.** The vector store is built at ingestion time. RTI rule amendments require re-running `ingest.py` with updated PDFs. An automated document change detection pipeline would be needed for production deployment.
 
-The history-aware condenser is the most important ML design decision for usability. Without it, the system operates in zero-shot mode per query: each retrieval is blind to prior context. With it, the system correctly resolves:
-- *"What is the RTI fee?"* → *"How can I pay it?"* → *"And what if I can't pay online?"*
-A naive implementation would fail at the second and third questions; the condenser correctly generates *"RTI fee payment methods online"* and *"RTI fee offline payment or exemption"* as standalone queries.
+4. **API Rate Limits.** The free Groq tier has daily token limits. Under heavy concurrent load the retry mechanism is triggered. Production deployment would require a paid tier or API key rotation.
 
----
 
-## 5. System Design for Public/Government Use
+## 6. References
 
-### 5.1 Reliability
-- **Tenacity retry**: 3 attempts with exponential backoff (2s → 4s → 8s) on Groq 429 rate-limit errors. The user sees a friendly message rather than a stack trace.
-- **Graceful degradation**: If `chroma_db/` is missing, the app shows setup instructions instead of crashing.
-- **Sanitized input**: User input is stripped and truncated to 1000 characters before being sent to the LLM.
-
-### 5.2 Scalability
-- **Stateless design**: All user session data is stored in `st.session_state` (client-side). The server holds no per-user state → multiple Streamlit workers can serve requests without shared state concerns.
-- **`@st.cache_resource`**: The embedding model, ChromaDB connection, and LLM client are initialised once per worker process and reused for all subsequent requests — not recreated on every page interaction.
-
-### 5.3 Usability
-- **Hindi Language Toggle**: The most significant accessibility feature. Citizens who are more comfortable in Hindi can toggle the response language. The LLM responds in Devanagari script. The user can ask in English or Hindi.
-- **Welcome message** with example questions reduces friction for first-time users.
-- **Progressive streaming** gives immediate feedback; users don't stare at a blank screen.
-- **Expandable citations** keep the chat clean while making sources verifiable on demand.
-- **Clear Chat** button lets users start fresh without reloading the page.
-
----
-
-## 6. Optional Feature: Hindi Language Toggle
-
-The assignment specification lists *"Talk in Hindi toggle"* as an optional feature. This is fully implemented:
-
-- A sidebar toggle **"🇮🇳 Respond in Hindi"** persists in `st.session_state.hindi_mode`.
-- When active, the system prompt includes:
-  > *"IMPORTANT: You MUST respond entirely in Hindi (Devanagari script). Even if the question is asked in English, answer in Hindi."*
-- This leverages `llama-3.3-70b-versatile`'s strong multilingual capability.
-- A confirmation message in Hindi is displayed in the sidebar when the mode is active.
-
----
-
-## 7. Sample Interactions & Evaluation
-
-**Query 1 (English):**  
-*"What is the fee for filing an RTI application?"*  
-**Response:** *"A request for obtaining information under sub-section (1) of Section 6 shall be accompanied by an application fee of rupees ten..."*  
-**Source:** RTI_Rules_2019_hindi_english.pdf [Rules] — page 3
-
-**Query 2 (Multi-turn follow-up):**  
-*"And what if I belong to the BPL category?"*  
-**Response:** *"Persons below the poverty line (BPL) are exempted from paying the application fee..."*  
-**Source:** RTI_Rules_2019_hindi_english.pdf [Rules] — page 4
-
-**Query 3 (Hindi mode active, English input):**  
-*"What is the time limit for a PIO to respond?"*  
-**Response:** *"सूचना का अधिकार अधिनियम 2005 की धारा 7(1) के अनुसार, जन सूचना अधिकारी को आवेदन प्राप्त होने के 30 दिनों के भीतर जानकारी प्रदान करनी होगी..."*  
-**Source:** RTI Act 2005 [Act] — page 5
-
-The source citations demonstrate that the system correctly identifies and attributes information to its origin document, building user trust.
-
----
-
-## 8. Conclusion
-
-This project delivers a robust, production-quality RAG chatbot for RTI filing assistance. Key accomplishments beyond the baseline:
-
-1. **Hindi toggle** (optional assignment feature) — fully implemented
-2. **Smart section-aware chunking** with deterministic IDs — ML best practice
-3. **MMR retrieval** — improved context diversity over naive top-k
-4. **History-aware multi-turn** — essential for real conversational usability
-5. **Streaming + retry** — production-grade reliability and UX
-6. **Stateless, cached architecture** — scalable system design for public use
-
-The pipeline requires no model training and is grounded entirely in verified official documents, making it suitable for deployment as a public citizen assistance tool.
-
----
-
-## References
-
-1. Lewis, P. et al. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. *NeurIPS 2020*.
-2. RTI Act 2005, Government of India. https://rti.gov.in
-3. Reimers, N. & Gurevych, I. (2019). Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks. *EMNLP 2019*.
-4. LangChain Documentation. https://python.langchain.com
-5. Groq API Documentation. https://console.groq.com/docs
+1. Lewis, P. et al. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. NeurIPS 2020. arXiv:2005.11401
+2. Carbonell, J. and Goldstein, J. (1998). The Use of MMR, Diversity-Based Reranking for Reordering Documents and Producing Summaries. SIGIR 1998.
+3. Government of India. (2005). The Right to Information Act, 2005. [https://rti.gov.in](https://rti.gov.in).
+4. Government of India. (2019). The Right to Information (Amendment) Rules, 2019. Ministry of Personnel, Public Grievances and Pensions.

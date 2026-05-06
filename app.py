@@ -1,34 +1,3 @@
-"""
-app.py — RTI Assistant Chatbot (Streamlit)
-==========================================
-A production-quality RAG chatbot for Indian RTI filing assistance.
-Built on LangChain LCEL (LangChain Expression Language) — the modern,
-composable API for chaining LLM operations.
-
-Key design decisions:
-    - Navigation              : Home, Resources, and Settings views.
-    - PDF Resource List       : Dynamic listing of local RTI documentation.
-    - Hero & Quick Access     : Modern card-based dashboard layout.
-    - History-aware retrieval  : condenses multi-turn dialogue into a
-                               standalone query before retrieval, so
-                               follow-up questions like "What about the fees?"
-                               work correctly.
-  - MMR retrieval            : Maximal Marginal Relevance selects diverse
-                               chunks (not just the top-k most similar),
-                               reducing redundancy in context.
-  - Streaming                : LLM tokens are streamed to the UI so the
-                               user sees output progressively (low perceived
-                               latency — critical for public-facing apps).
-  - Tenacity retry           : exponential backoff on 429/rate-limit errors.
-  - Hindi toggle             : Optional assignment feature; switches the
-                               system prompt so the LLM responds in Hindi.
-  - Stateless session design : all chat state is kept in st.session_state;
-                               the server holds no per-user data → scalable.
-  - @st.cache_resource       : the heavy pipeline (embeddings + vector DB +
-                               LLM) is loaded once per Streamlit worker
-                               process, not on every page interaction.
-"""
-
 import os
 import base64
 import streamlit as st
@@ -50,7 +19,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
-# ──────────────────────────── Configuration ────────────────────────────────
 load_dotenv()
 
 CHROMA_PATH        = "chroma_db"
@@ -58,15 +26,12 @@ EMBED_MODEL        = "all-MiniLM-L6-v2"
 DEFAULT_GROQ_MODEL = "llama3-8b-8192"
 GROQ_MODEL         = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
 
-# MMR retrieval parameters
-MMR_FETCH_K   = 20   # candidate pool size (cast wide net)
-MMR_K         = 6    # final chunks returned after diversity filter
-MMR_LAMBDA    = 0.7  # 0=max diversity, 1=max relevance; 0.7 balances well
+MMR_FETCH_K = 20
+MMR_K       = 6
+MMR_LAMBDA  = 0.7
+MAX_HISTORY = 10
 
-# Max LangChain history messages to pass to condenser (keeps tokens low)
-MAX_HISTORY   = 10
-
-# ──────────────────────────── Streamlit page ───────────────────────────────
+# ───────────── Streamlit page ────────────────────
 st.set_page_config(
     page_title="RTI Assistant",
     page_icon="⚖️",
@@ -74,7 +39,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ──────────────────────── Iconography (SVG) ───────────────────────────────
+# ───────── Iconography (SVG) ─────────────
 
 def get_icon_svg(name, size=20, color="currentColor"):
     icons = {
@@ -268,40 +233,18 @@ section[data-testid="stSidebar"] {{
 
 @st.cache_resource(show_spinner="Loading RTI knowledge base…")
 def load_pipeline_components():
-    """
-    Build and cache the heavy pipeline components.
-    Called once per Streamlit worker — not recreated on every interaction.
-
-    Returns a dict with:
-      - 'retriever'    : MMR-configured ChromaDB retriever
-      - 'llm'          : ChatGroq instance (streaming)
-      - 'chunk_count'  : total chunk count for UI display
-    Returns None if the vector DB doesn't exist.
-    """
+    """Load embeddings, vector store, and LLM once per worker process."""
     if not os.path.exists(CHROMA_PATH):
         return None
 
-    # 1. Local embeddings — no API cost, consistent with ingestion
     embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-
-    # 2. Vector store
     db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
     chunk_count = db._collection.count()
 
-    # 3. MMR Retriever
-    #    fetch_k=20 → evaluate 20 candidates for diversity
-    #    k=6        → return 6 most diverse relevant chunks
-    #    lambda=0.7 → favour relevance slightly over diversity
     retriever = db.as_retriever(
         search_type="mmr",
-        search_kwargs={
-            "k":           MMR_K,
-            "fetch_k":     MMR_FETCH_K,
-            "lambda_mult": MMR_LAMBDA,
-        },
+        search_kwargs={"k": MMR_K, "fetch_k": MMR_FETCH_K, "lambda_mult": MMR_LAMBDA},
     )
-
-    # 4. LLM — streaming=True for progressive token output
     llm = ChatGroq(model=GROQ_MODEL, temperature=0, streaming=True)
 
     return {"retriever": retriever, "llm": llm, "chunk_count": chunk_count}
@@ -310,16 +253,7 @@ def load_pipeline_components():
 # ──────────────────────── LCEL Chain Builders ──────────────────────────────
 
 def build_condenser_chain(llm):
-    """
-    Build the question-condensing chain.
-    Takes {chat_history, input} and produces a standalone query string.
-
-    Why this matters:
-    Without this, a follow-up like "What about the appeal process?"
-    is retrieved as-is — the retriever has no idea what "this" refers to.
-    The condenser rewrites it as "What is the first/second appeal process
-    under the RTI Act?" — drastically improving retrieval precision.
-    """
+    """Rewrite the latest user message into a standalone search query."""
     condense_prompt = ChatPromptTemplate.from_messages([
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
@@ -332,17 +266,7 @@ def build_condenser_chain(llm):
 
 
 def build_rag_chain(llm, retriever, hindi_mode: bool):
-    """
-    Build the full LCEL RAG pipeline dynamically.
-    Rebuilt when hindi_mode changes (lightweight operation — no DB/model reload).
-
-    Pipeline:
-      {input, chat_history}
-          → condenser  → standalone_query
-          → retriever  → context_docs
-          → prompt     → augmented_prompt
-          → llm        → answer_text
-    """
+    """Build the LCEL RAG pipeline. Rebuilt on hindi_mode change (no model reload)."""
     if hindi_mode:
         lang_instruction = (
             "IMPORTANT: You MUST respond entirely in Hindi (Devanagari script). "
@@ -375,10 +299,8 @@ def build_rag_chain(llm, retriever, hindi_mode: bool):
     def format_docs(docs):
         return "\n\n---\n\n".join(doc.page_content for doc in docs)
 
-    # LCEL pipeline — composable, inspectable, parallelisable
     chain = (
         RunnablePassthrough.assign(
-            # Step 1: condense history + question → standalone query
             standalone_query=RunnableLambda(
                 lambda x: condenser.invoke({
                     "chat_history": x.get("chat_history", []),
@@ -387,15 +309,14 @@ def build_rag_chain(llm, retriever, hindi_mode: bool):
             )
         )
         | RunnablePassthrough.assign(
-            # Step 2: retrieve diverse context using the condensed query
             context=RunnableLambda(lambda x: format_docs(
                 retriever.invoke(x["standalone_query"])
             )),
-            # Preserve source docs for citation display
-            source_documents=RunnableLambda(lambda x: retriever.invoke(x["standalone_query"]))
+            source_documents=RunnableLambda(
+                lambda x: retriever.invoke(x["standalone_query"])
+            )
         )
         | RunnablePassthrough.assign(
-            # Step 3: generate answer
             answer=(qa_prompt | llm | StrOutputParser())
         )
     )
@@ -412,10 +333,7 @@ def build_rag_chain(llm, retriever, hindi_mode: bool):
     reraise=True,
 )
 def invoke_with_retry(chain, payload: dict):
-    """
-    Invoke the RAG chain with exponential backoff.
-    Retries up to 3 times on rate-limit errors (2s → 4s → 8s wait).
-    """
+    """Invoke chain with exponential backoff (3 attempts, 2s/4s/8s)."""
     return chain.invoke(payload)
 
 
@@ -437,11 +355,10 @@ def set_view(view_name):
 
 
 def append_message(role: str, content: str):
-    """Append to both display history and LangChain message history."""
+    """Append to display history and LangChain message list; trim to MAX_HISTORY."""
     st.session_state.messages.append({"role": role, "content": content})
     msg = HumanMessage(content=content) if role == "user" else AIMessage(content=content)
     st.session_state.lc_history.append(msg)
-    # Trim to MAX_HISTORY to bound token usage
     if len(st.session_state.lc_history) > MAX_HISTORY:
         st.session_state.lc_history = st.session_state.lc_history[-MAX_HISTORY:]
 
