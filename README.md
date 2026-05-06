@@ -2,6 +2,8 @@
 
 > **SMAI Assignment 3 · Theme T10.3 — RTI Filing Helper**  
 > A production-quality Retrieval-Augmented Generation (RAG) chatbot for Indian RTI documentation.
+> Team: The3
+> Team Members: Shada Praneeth Reddy (2025204006), Nagam Chandrakanth Reddy (2025204003), Pittada Sai Harsha Vardhan (2025204021)
 
 ---
 

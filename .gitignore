@@ -1,7 +1,6 @@
 # Environment variables
 .env
 .env.local
-.env.*
 
 # Python virtual environments
 venv/
@@ -22,6 +21,6 @@ Thumbs.db
 
 # RAG/Data specific (if you have local vector stores or logs)
 *.log
-data/
+# data/
 storage/
 chroma_db/

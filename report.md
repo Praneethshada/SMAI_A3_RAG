@@ -1,7 +1,9 @@
 # SMAI Assignment 3: RTI Assistant — Government Services RAG Chatbot
 
 **Theme T10.3 — RTI Filing Helper**  
-**Course:** Statistical Methods in AI (SMAI)  
+**Course:** Statistical Methods in AI
+**Team:** The3
+**Team Members:** Shada Praneeth Reddy (2025204006), Nagam Chandrakanth Reddy (2025204003), Pittada Sai Harsha Vardhan (2025204021)
 
 ---
 
