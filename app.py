@@ -164,6 +164,7 @@ section[data-testid="stSidebar"] {{
     cursor: pointer;
     display: flex;
     gap: 15px;
+    margin-bottom: 20px;
 }}
 .access-card:hover {{
     transform: translateY(-4px);
@@ -220,6 +221,13 @@ section[data-testid="stSidebar"] {{
     gap: 15px;
 }}
 .resource-card:hover {{ border-color: var(--primary); background: var(--primary-light); }}
+
+/* Hide the link symbol (anchor) on headers */
+.header-anchor, [data-testid="stHeaderActionElements"], 
+h1 a, h2 a, h3 a, h4 a, h5 a, h6 a,
+.st-emotion-cache-15zrgzn {{
+    display: none !important;
+}}
 
 </style>
 """, unsafe_allow_html=True)
@@ -398,7 +406,7 @@ def render_sidebar(pipeline, current_page_title, pages_dict):
         )
         
         st.divider()
-        st.markdown(f"#### {get_icon_svg('info', 18)} System Info", unsafe_allow_html=True)
+        st.markdown(f"<h4>{get_icon_svg('info', 18)} System Info</h4>", unsafe_allow_html=True)
 
         if pipeline:
             badges = [
@@ -468,7 +476,7 @@ def render_home_view(pipeline):
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("### How can I help you today?")
+        st.markdown('<h3 style="margin-top: 1rem; margin-bottom: 1.5rem;">How can I help you today?</h3>', unsafe_allow_html=True)
         
         cards = [
             ("clipboard", "Application Process", "Step-by-step guidance on how to file an RTI request."),
